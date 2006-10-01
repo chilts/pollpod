@@ -1,0 +1,2 @@
+fakeroot dpkg-buildpackage -tc 
+lintian ../*.deb

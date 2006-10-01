@@ -1,0 +1,312 @@
+#!/usr/bin/perl
+## -------------------------------------------------------------------*-perl-*-
+# Created   : 20060927
+# By        : Andrew Chilton
+# Email     : < andychilton at gmail dot com >
+# Websites  : http://kapiti.geek.nz/
+#           : http://www.chilts.org/
+# Copyright : (c) Andrew Chilton 2006
+# Version   : 0.1
+#
+# This program is free software; you can redistribute it and/or modify it under
+# the same terms as Perl itself.
+#
+# See http://www.perl.com/language/misc/Artistic.html
+## ----------------------------------------------------------------------------
+
+use strict;
+use warnings;
+
+use YAML ();
+use File::Slurp;
+use XML::XPath;
+use LWP::Simple;
+use Getopt::Mixed "nextOption";
+use URI;
+
+my @options = qw(dir test verbose catchup help);
+
+my $opt_desc = qq{dir=s d>dir
+   test    t>test
+   catchup c>catchup
+   quiet   q>quiet
+   verbose v>verbose
+   version V>version
+   help    h>help
+};
+
+my $DEBUG = 0;
+
+## ----------------------------------------------------------------------------
+
+MAIN: {
+    # get the command line options
+    my $cfg = { dir => '.' };
+    Getopt::Mixed::init($opt_desc);
+    while (my ($option, $value, $pretty) = nextOption()) {
+        $cfg->{$option} = $value;
+    }
+    Getopt::Mixed::cleanup();
+    foreach ( qw(test catchup verbose quiet version help) ) {
+        $cfg->{$_} = 1 if exists $cfg->{$_};
+    }
+    dmp('cfg', $cfg);
+
+    if ( $cfg->{version} ) {
+        print "$0 v0.1\n\n";
+        print "Copyright Andrew Chilton (see http://www.chilts.org/software/)\n";
+        exit 2;
+    }
+
+    if ( $cfg->{help} ) {
+        usage();
+        exit 2;
+    }
+
+    if ( $cfg->{verbose} and $cfg->{quiet} ) {
+        $cfg->{verbose} = $cfg->{quiet} = 0;
+    }
+    set_verbose( $cfg->{verbose} );
+    set_quiet( $cfg->{quiet} );
+
+    # read the feeds file
+    my $feeds = read_feeds();
+    dmp('feeds', $feeds);
+
+    # read the current save file
+    my $savefile = "$cfg->{dir}/pollpod.yaml";
+    my $save = {};
+    if ( -e $savefile ) {
+        $save = YAML::LoadFile( $savefile );
+        dmp('save', $save);
+    }
+
+    # process everything
+    process( $cfg, $feeds, $save );
+
+    # write the save file back out
+    dmp('save', $save);
+    YAML::DumpFile( $savefile, $save ) unless $cfg->{test};
+}
+
+## ----------------------------------------------------------------------------
+# subs
+
+sub process {
+    my ($cfg, $feeds, $save) = @_;
+
+    unless ( %$feeds) {
+        error("No feeds found");
+        return;
+    }
+
+    # verbose( "Feeds found : " . scalar %$feeds / 2 );
+
+    while (my ($feedname, $feedurl) = each %$feeds) {
+        msg("Feed $feedname...");
+
+        # read in the XML
+        my $xml;
+        unless ( $xml = get($feedurl) ) {
+            error("Couldn't read: $feedurl");
+            $save->{$feedname}{error} = "Unable to read feed URL";
+            next;
+        }
+
+        # parse the XML for XPath
+        my $xp = XML::XPath->new( $xml );
+        my @els = $xp->findnodes( '//enclosure' );
+        unless ( @els ) {
+            $save->{$feedname}{info} = "Couldn't find any 'enclosures' in XML";
+            msg(" - info     : no available podcasts!" );
+            next;
+        }
+
+        # we had some enclosures, now process them
+        foreach my $el ( @els ) {
+            my $podcasturl = $el->getAttribute( 'url' );
+            msg(" - podcast  : $podcasturl" );
+
+            if ( exists $save->{$feedname}{shows}{$podcasturl}
+                 and $save->{$feedname}{shows}{$podcasturl} eq 'Downloaded OK' ) {
+                msg(" - download : already downloaded!");
+                next;
+            }
+
+            # see if this was a catchup
+            if ( $cfg->{catchup} ) {
+                $save->{$feedname}{shows}{$podcasturl} = 'Caught Up';
+                msg(' - catchup  : Done!');
+                next;
+            }
+
+            # create this dir unless it already exists
+            unless ( -d "$cfg->{dir}/$feedname" ) {
+                mkdir "$cfg->{dir}/$feedname";
+                msg(" - created  : dir '$feedname'");
+            }
+
+            # skip the download if we are in test mode
+            if ( $cfg->{test} ) {
+                msg(' - test     : Not downloading!');
+                next;
+            }
+
+            # download the podcast
+            my $uri = URI->new( $podcasturl );
+            my @path = $uri->path_segments();
+            msg(' - filename : ' . $path[-1]);
+
+            msg(' - fetching : ...' );
+            my $response = getstore( $podcasturl, "$cfg->{dir}/$feedname/$path[-1]" );
+            if ( $response != 200 ) {
+                msg(' - failed   : error ' . $response);
+                $save->{$feedname}{shows}{$podcasturl} = $response;
+                next;
+            }
+            $save->{$feedname}{shows}{$podcasturl} = 'Downloaded OK';
+            msg(' - download : Done!');
+        }
+    }
+    dmp('save', $save);
+}
+
+## ----------------------------------------------------------------------------
+# subs
+
+sub read_feeds {
+    my @lines = read_file( "$ENV{HOME}/.pollpod" );
+    my $feeds = {};
+    foreach ( @lines ) {
+        next if m{ \A \# }xms;
+        my ($name, $url) = $_ =~ m{ \A (\w+) = (.+) \z }xms;
+        $feeds->{$name} = $url;
+    }
+    return $feeds;
+}
+
+sub tilde
+{
+    my ($path) = @_;
+    $path =~ s|^\~(\w+)|(getpwnam($1))[7]|e;
+    $path =~ s/^\~/$ENV{HOME}/;
+    $path ="." if $path eq '';
+    return $path;
+}
+
+sub dmp {
+    my ($text, $var) = @_;
+    print Data::Dumper->Dump([$var], [$text]) if $DEBUG;
+}
+
+{
+    my ($VERBOSE, $QUIET);
+    sub set_verbose { $VERBOSE = $_[0]; };
+    sub set_quiet { $QUIET = $_[0]; };
+
+    sub verbose { print $_[0], "\n" if $VERBOSE; }
+    sub msg { print $_[0], "\n" unless $QUIET; }
+    sub error { print STDERR $_[0], "\n"; }
+}
+
+sub usage {
+   print STDERR <<EOF
+Usage: $0 [options...]
+Options:
+   -d,--dir=DIR            to save the podcasts in
+   -t,--test               to test the program without downloading anything
+   -c,--catchup            to catchup the podcasts without downloading any
+   -q,--quiet              shows less information
+   -v,--verbose            shows extra information
+   -V,--version            this program\'s version
+   -h,--help               this help screen
+
+Copyright Andrew Chilton (see http://www.chilts.org/software/)
+EOF
+}
+
+## ----------------------------------------------------------------------------
+
+=head1 NAME
+
+PollPod - a command line tool for downloading Podcasts from feeds
+
+=head1 SYNOPSIS
+
+    $ pollpod
+    Feed ChrisEvans...
+     - podcast  : http://downloads.bbc.co.uk/rmhttp/downloadtrial/radio2/chrisevans-thebestbits/chrisevans-thebestbits_20060929-2000_40_pc.mp3
+     - filename : chrisevans-thebestbits_20060929-2000_40_pc.mp3
+     - download : Done!
+    Feed FightingTalk...
+     - info     : no available podcasts!
+    $
+
+=head1 DESCRIPTION
+
+Using pollpod is simplicity itself. Generally you can just run it and it will
+work. It will read your ~/.pollpod file for a list of feeds and the directories
+it should save any podcasts in.
+
+The default save directory is ./ but this may be changed with the -d option.
+
+-d, --dir=DIR (default ./)
+   the directory to download create the podcast directories and download to
+
+-t, --test
+   downloads the feed file and processes it without downloading the podcast itself
+
+-c, --catchup
+   marks all the podcasts in each feed as caught up and won't try to download it
+
+-q, --quiet
+   shows less information but still shows error messages
+
+-v, --verbose
+   shows more information
+
+-V, --version
+   shows the version number
+
+-h, --help
+   shows the usage information
+
+=head1 POLLPOD FEED FILE
+
+The file ~/.pollpod is read to see which feeds to download. It is a simple file
+and consists of NAME=URL pairs, one on each line. The name of the podcast is
+also used as the name of the directory to download the podcast file into. An
+example file might look like:
+
+    NASA=http://science.nasa.gov/podcast.xml
+    AstronomyCast=http://www.astronomycast.com/podcast.xml
+
+Blank lines are ignored. Lines beginning with # are taken as comments and
+ignored. Lines which look a bit unusual are ignored. The NAME (and
+consequentially the directory) may only consist of alpha-numeric characters and
+the underscore.
+
+=head1 AUTHOR
+
+Written by Andrew Chilton <andychilton@gmail.com> (http://www.chilts.org/)
+
+=head1 REPORTING BUGS
+
+Head over to <http://code.google.com/p/pollpod/issues/list> and input what you
+expected to happen, what actually happened and any supplementary data you have
+(run the program with -v).
+
+=head1 COPYRIGHT
+
+Copyright 2006 Andrew Chilton (http://www.chilts.org/)
+
+This program is free software; you can redistribute it and/or modify it under
+the same terms as Perl itself.
+
+See http://www.perl.com/language/misc/Artistic.html
+
+=head1 SEE ALSO
+
+Other command line podcast fetch-type programs here...
+
+=cut

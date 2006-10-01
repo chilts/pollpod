@@ -1,0 +1,19 @@
+Source: pollpod
+Section: perl
+Priority: optional
+Maintainer: Andrew Chilton <andychilton@gmail.com>
+Uploaders: Andrew Chilton <andychilton@gmail.com>
+Standards-Version: 3.6.1
+Build-Depends-Indep: debhelper (>= 4.1), perl
+
+Package: pollpod
+Section: perl
+Priority: optional
+Architecture: all
+Build-Depends: ${perl:Depends}
+Pre-Depends: ${perl:Depends}
+Depends: libyaml-perl, libwww-perl, libxml-xpath-perl, libgetopt-mixed-perl, liburi-perl, libfile-slurp-perl
+Description: download Podcasts via a cron or the command line
+ Using a small configuration file, you can tell PollPod which podcasts to
+ subscribe to. Via your cron, just run it as often as you please to download the
+ latest Podcasts.
