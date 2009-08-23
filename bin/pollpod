@@ -175,7 +175,11 @@ sub process {
 # subs
 
 sub read_feeds {
-    my @lines = read_file( "$ENV{HOME}/.pollpod" );
+    my $filename = qq{$ENV{HOME}/.pollpod.rc};
+    unless ( -f $filename ) {
+        fatal( qq{No such file: $filename} );
+    }
+    my @lines = read_file( $filename );
     my $feeds = {};
     foreach ( @lines ) {
         next if m{ \A \# }xms;
@@ -207,6 +211,7 @@ sub dmp {
     sub verbose { print $_[0], "\n" if $VERBOSE; }
     sub msg { print $_[0], "\n" unless $QUIET; }
     sub error { print STDERR $_[0], "\n"; }
+    sub fatal { print STDERR $_[0], "\n"; exit 2; }
 }
 
 sub usage {
